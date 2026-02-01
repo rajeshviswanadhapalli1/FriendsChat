@@ -11,6 +11,12 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
+  age: {
+    type: Number,
+    default: null,
+    min: 0,
+    max: 150,
+  },
   profilePicture: {
     type: String,
     default: '',
