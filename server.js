@@ -74,18 +74,6 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-}).on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n❌ Error: Port ${PORT} is already in use.`);
-    console.error(`\nTo fix this, you can:`);
-    console.error(`1. Kill the process using port ${PORT}:`);
-    console.error(`   lsof -ti:${PORT} | xargs kill -9`);
-    console.error(`2. Or change the PORT in your .env file to a different port (e.g., 3000, 3001, etc.)\n`);
-    process.exit(1);
-  } else {
-    console.error('Server error:', err);
-    process.exit(1);
-  }
 });
 
 // Handle unhandled promise rejections

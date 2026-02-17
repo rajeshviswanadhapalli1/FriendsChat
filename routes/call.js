@@ -1,71 +1,41 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate } = require('../middleware/auth');
-const { generateRtcToken } = require('../utils/agoraToken');
 
 /**
  * GET /api/call/config
- * Returns Agora App ID and optional temp token (for dev). Use in frontend agora config.
+ * Returns WebRTC ICE servers (STUN/TURN) for RTCPeerConnection.
+ * Use in both dev and production. TURN is optional but recommended for production.
  */
 router.get('/config', authenticate, (req, res) => {
   try {
-    const appId = process.env.AGORA_APP_ID || '';
-    const token = process.env.AGORA_TEMP_TOKEN || null;
+    const iceServers = [];
+
+    // STUN: free, works for many dev and simple prod setups
+    const stunUrl = process.env.WEBRTC_STUN_URL || 'stun:stun.l.google.com:19302';
+    iceServers.push({ urls: stunUrl });
+
+    // TURN: optional, improves connectivity behind symmetric NAT (production)
+    const turnUrl = process.env.WEBRTC_TURN_URL;
+    const turnUsername = process.env.WEBRTC_TURN_USERNAME;
+    const turnCredential = process.env.WEBRTC_TURN_CREDENTIAL;
+
+    if (turnUrl) {
+      iceServers.push({
+        urls: turnUrl,
+        username: turnUsername || undefined,
+        credential: turnCredential || undefined,
+      });
+    }
+
     res.status(200).json({
       success: true,
       data: {
-        appId,
-        token,
+        iceServers,
       },
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
-  }
-});
-
-/**
- * GET /api/call/token
- * Query: channelName (required), uid (required, 1 to 2^32-1)
- * Returns Agora RTC token for react-native-agora joinChannel.
- */
-router.get('/token', authenticate, (req, res) => {
-  try {
-    const { channelName, uid } = req.query;
-
-    if (!channelName || !uid) {
-      return res.status(400).json({
-        success: false,
-        message: 'channelName and uid are required',
-      });
-    }
-
-    const uidNum = parseInt(uid, 10);
-    if (isNaN(uidNum) || uidNum < 1 || uidNum > 4294967295) {
-      return res.status(400).json({
-        success: false,
-        message: 'uid must be a number between 1 and 4294967295',
-      });
-    }
-
-    const expirationSeconds = parseInt(req.query.expiration, 10) || 3600;
-    const token = generateRtcToken(channelName, uidNum, expirationSeconds);
-
-    res.status(200).json({
-      success: true,
-      data: {
-        token,
-        channelName,
-        uid: uidNum,
-        appId: process.env.AGORA_APP_ID,
-        expirationSeconds,
-      },
-    });
-  } catch (error) {
-    console.error('Error generating Agora token:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Error generating token',
-    });
   }
 });
 

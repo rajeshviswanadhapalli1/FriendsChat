@@ -2,7 +2,7 @@ const { verifyAccessToken, verifyRefreshToken, generateAccessToken } = require('
 const User = require('../models/User');
 const Chat = require('../models/Chat');
 const Message = require('../models/Message');
-const { sendMessageNotification } = require('../config/firebase');
+const { sendMessageNotification, sendCallOfferNotification } = require('../config/firebase');
 
 // Store active users (userId -> socketId)
 const activeUsers = new Map();
@@ -85,19 +85,18 @@ const initializeSocket = (io) => {
     });
 
     // =========================
-    // Calling (Agora RTC + Socket.io signaling)
+    // WebRTC Calling (Socket.io signaling only; media is peer-to-peer)
     // =========================
-    // Events match frontend: call-invite, call-accept, call-reject, call-end.
-    // Media goes through Agora; backend only relays signaling.
+    // Events: call-invite (offer), call-accept (answer), ice-candidate, call-reject, call-end
 
-    // Caller starts call (client → server). Forward to callee.
-    // Payload: { channelId, callType: 'audio'|'video', callerId, callerName, calleeId }
+    // Caller starts call: sends offer. Server forwards to callee.
+    // Payload: { channelId, callType: 'audio'|'video', callerId, callerName, calleeId, offer }
     socket.on('call-invite', async (data) => {
       try {
-        const { channelId, callType = 'audio', callerId, callerName, calleeId } = data || {};
+        const { channelId, callType = 'audio', callerId, callerName, calleeId, offer } = data || {};
 
-        if (!channelId || !callerId || !calleeId) {
-          socket.emit('call-error', { message: 'channelId, callerId and calleeId are required' });
+        if (!channelId || !callerId || !calleeId || !offer) {
+          socket.emit('call-error', { message: 'channelId, callerId, calleeId and offer are required' });
           return;
         }
 
@@ -135,33 +134,45 @@ const initializeSocket = (io) => {
           }
         }
 
-        const payload = {
-          channelId,
-          callType,
-          callerId,
-          callerName: callerName || '',
-          calleeId,
-        };
         activeCalls.set(String(channelId), {
           callerId: socket.userId,
           calleeId,
           callerName: callerName || '',
         });
 
-        io.to(calleeSocketId).emit('call-invite', payload);
+        io.to(calleeSocketId).emit('call-invite', {
+          channelId,
+          callType,
+          callerId,
+          callerName: callerName || '',
+          calleeId,
+          offer,
+        });
+
+        // Push notification for incoming call (e.g. when app is in background)
+        const calleeUser = await User.findById(calleeId).select('fcmToken').lean();
+        if (calleeUser?.fcmToken) {
+          sendCallOfferNotification(calleeUser.fcmToken, {
+            channelId,
+            callerId: socket.userId,
+            callerName: callerName || '',
+            calleeId,
+            callType,
+          }).catch((err) => console.error('FCM call offer:', err.message));
+        }
       } catch (error) {
         console.error('call-invite error:', error);
         socket.emit('call-error', { message: 'Error starting call' });
       }
     });
 
-    // Callee accepts (client → server). Notify caller.
-    // Payload: { channelId, callerId }
+    // Callee accepts: sends answer. Server forwards to caller.
+    // Payload: { channelId, callerId, answer }
     socket.on('call-accept', async (data) => {
       try {
-        const { channelId, callerId } = data || {};
-        if (!channelId || !callerId) {
-          socket.emit('call-error', { message: 'channelId and callerId are required' });
+        const { channelId, callerId, answer } = data || {};
+        if (!channelId || !callerId || !answer) {
+          socket.emit('call-error', { message: 'channelId, callerId and answer are required' });
           return;
         }
 
@@ -183,15 +194,31 @@ const initializeSocket = (io) => {
           return;
         }
 
-        io.to(callerSocketId).emit('call-accepted', { channelId, callerId });
+        io.to(callerSocketId).emit('call-accepted', { channelId, callerId, answer });
       } catch (error) {
         console.error('call-accept error:', error);
         socket.emit('call-error', { message: 'Error accepting call' });
       }
     });
 
+    // Relay ICE candidate to the other peer.
+    // Payload: { channelId, candidate, fromUserId }
+    socket.on('ice-candidate', (data) => {
+      const { channelId, candidate, fromUserId } = data || {};
+      if (!channelId || !candidate || !fromUserId) return;
+
+      const call = activeCalls.get(String(channelId));
+      if (!call) return;
+
+      const otherUserId =
+        call.callerId.toString() === fromUserId.toString() ? call.calleeId : call.callerId;
+      const otherSocketId = activeUsers.get(otherUserId.toString());
+      if (otherSocketId) {
+        io.to(otherSocketId).emit('ice-candidate', { channelId, candidate, fromUserId });
+      }
+    });
+
     // Callee rejects (client → server). Notify caller.
-    // Payload: { channelId, callerId }
     socket.on('call-reject', async (data) => {
       const { channelId, callerId } = data || {};
       if (!channelId || !callerId) return;
@@ -207,8 +234,7 @@ const initializeSocket = (io) => {
       activeCalls.delete(String(channelId));
     });
 
-    // Either party ends call (client → server). Notify other peer.
-    // Payload: { channelId }
+    // Either party ends call. Notify other peer.
     socket.on('call-end', async (data) => {
       const { channelId } = data || {};
       if (!channelId) return;
@@ -434,17 +460,27 @@ const initializeSocket = (io) => {
           });
         }
 
-        // Send push notification (FCM) - useful when receiver is offline or app in background
+        // Send push notification (FCM) - when receiver is offline or app in background
         const receiverUser = await User.findById(receiverId).select('fcmToken').lean();
         if (receiverUser?.fcmToken) {
           const senderName = socket.user?.name || socket.user?.mobileNumber || 'Someone';
-          sendMessageNotification(receiverUser.fcmToken, {
-            chatId: effectiveChatId,
-            senderId: socket.userId,
-            senderName,
-            receiverId,
-            message: newMessage.message,
-          }).catch((err) => console.error('FCM push error:', err.message));
+          const fcmPayload = {
+            chatId: String(effectiveChatId),
+            senderId: String(socket.userId),
+            senderName: senderName || 'Someone',
+            receiverId: String(receiverId),
+            message: typeof newMessage.message === 'string' ? newMessage.message : String(newMessage.message || ''),
+          };
+          try {
+            const sent = await sendMessageNotification(receiverUser.fcmToken, fcmPayload);
+            if (!sent) {
+              console.warn('FCM: Push notification was not sent (check logs above)');
+            }
+          } catch (err) {
+            console.error('FCM: Push error:', err.message);
+          }
+        } else {
+          console.log('FCM: Receiver has no fcmToken', { receiverId: String(receiverId) });
         }
 
         const otherUser =
