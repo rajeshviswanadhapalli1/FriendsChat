@@ -8,48 +8,119 @@ const fs = require('fs');
 
 let admin = null;
 let isInitialized = false;
+let initializationAttempted = false;
 
 function initializeFirebase() {
-  if (isInitialized && admin) return admin;
+  // If already initialized and working, return it
+  if (isInitialized && admin) {
+    try {
+      // Verify it's still working by checking apps
+      const firebaseAdmin = require('firebase-admin');
+      if (firebaseAdmin.apps && firebaseAdmin.apps.length > 0) {
+        return admin;
+      }
+    } catch (err) {
+      // If check fails, reset and try again
+      isInitialized = false;
+      admin = null;
+    }
+  }
 
   // Avoid duplicate app (e.g. if module reloaded or already initialized elsewhere)
   const firebaseAdmin = require('firebase-admin');
   if (firebaseAdmin.apps && firebaseAdmin.apps.length > 0) {
     admin = firebaseAdmin;
     isInitialized = true;
+    console.log('Firebase Admin: Using existing app instance');
     return admin;
   }
 
   const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
-  const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  let serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+  // Log initialization attempt
+  if (!initializationAttempted) {
+    console.log('Firebase: Initialization attempt...');
+    console.log('Firebase: FIREBASE_SERVICE_ACCOUNT_PATH:', serviceAccountPath ? 'SET' : 'NOT SET');
+    console.log('Firebase: FIREBASE_SERVICE_ACCOUNT_JSON:', serviceAccountJson ? `SET (length: ${serviceAccountJson.length})` : 'NOT SET');
+    initializationAttempted = true;
+  }
 
   if (serviceAccountPath) {
     try {
       const resolvedPath = path.resolve(process.cwd(), serviceAccountPath);
+      if (!fs.existsSync(resolvedPath)) {
+        console.error('Firebase: Service account file not found at:', resolvedPath);
+        return null;
+      }
       const fileContent = fs.readFileSync(resolvedPath, 'utf8');
       const serviceAccount = JSON.parse(fileContent);
+      
+      // Validate required fields
+      if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
+        console.error('Firebase: Service account JSON missing required fields (project_id, private_key, client_email)');
+        return null;
+      }
+
       admin = firebaseAdmin;
       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
       isInitialized = true;
-      console.log('Firebase Admin initialized (from file path)');
+      console.log('Firebase Admin initialized successfully (from file path)');
+      console.log('Firebase: Project ID:', serviceAccount.project_id);
+      return admin;
     } catch (err) {
-      console.warn('Firebase: Failed to initialize from path:', err.message);
+      console.error('Firebase: Failed to initialize from path:', err.message);
+      console.error('Firebase: Error details:', err.stack);
+      return null;
     }
   } else if (serviceAccountJson) {
     try {
+      // Try to decode base64 if it looks like base64
+      if (typeof serviceAccountJson === 'string') {
+        // Check if it's base64 encoded
+        const base64Pattern = /^[A-Za-z0-9+/=]+$/;
+        if (base64Pattern.test(serviceAccountJson) && serviceAccountJson.length > 100) {
+          try {
+            const decoded = Buffer.from(serviceAccountJson, 'base64').toString('utf8');
+            serviceAccountJson = decoded;
+            console.log('Firebase: Decoded base64 encoded service account JSON');
+          } catch (base64Err) {
+            // Not base64, continue with original string
+            console.log('Firebase: Service account JSON is not base64, parsing as JSON string');
+          }
+        }
+      }
+
+      // Parse JSON
       const serviceAccount = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson;
+      
+      // Validate required fields
+      if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
+        console.error('Firebase: Service account JSON missing required fields (project_id, private_key, client_email)');
+        console.error('Firebase: Available fields:', Object.keys(serviceAccount));
+        return null;
+      }
+
       admin = firebaseAdmin;
       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
       isInitialized = true;
-      console.log('Firebase Admin initialized (from env JSON)');
+      console.log('Firebase Admin initialized successfully (from env JSON)');
+      console.log('Firebase: Project ID:', serviceAccount.project_id);
+      return admin;
     } catch (err) {
-      console.warn('Firebase: Failed to initialize from JSON:', err.message);
+      console.error('Firebase: Failed to initialize from JSON:', err.message);
+      console.error('Firebase: Error details:', err.stack);
+      if (err.message.includes('JSON')) {
+        console.error('Firebase: JSON parsing failed. Check if FIREBASE_SERVICE_ACCOUNT_JSON is valid JSON or base64 encoded JSON.');
+      }
+      return null;
     }
   } else {
-    console.warn('Firebase: No FIREBASE_SERVICE_ACCOUNT_PATH or FIREBASE_SERVICE_ACCOUNT_JSON set. Push notifications disabled.');
+    if (!initializationAttempted) {
+      console.warn('Firebase: No FIREBASE_SERVICE_ACCOUNT_PATH or FIREBASE_SERVICE_ACCOUNT_JSON set. Push notifications disabled.');
+    }
+    return null;
   }
-
-  return admin;
 }
 
 // Lazy init on first use
@@ -63,14 +134,16 @@ initializeFirebase();
  */
 async function sendMessageNotification(receiverFcmToken, payload) {
   // Ensure Firebase is initialized (in case env was not loaded when module first loaded)
-  initializeFirebase();
+  const firebaseAdmin = initializeFirebase();
 
   if (!receiverFcmToken || typeof receiverFcmToken !== 'string' || !receiverFcmToken.trim()) {
+    console.warn('FCM: Invalid receiver FCM token');
     return false;
   }
 
-  if (!admin || !isInitialized) {
-    console.warn('FCM: Firebase not initialized, skipping push notification');
+  if (!firebaseAdmin || !isInitialized) {
+    console.error('FCM: Firebase not initialized, skipping push notification');
+    console.error('FCM: Check Firebase configuration in environment variables');
     return false;
   }
 
@@ -111,8 +184,9 @@ async function sendMessageNotification(receiverFcmToken, payload) {
       },
     };
 
-    const messageId = await admin.messaging().send(fcmMessage);
+    const messageId = await firebaseAdmin.messaging().send(fcmMessage);
     console.log('FCM: Push notification sent successfully:', messageId);
+    console.log('FCM: Sent to token:', receiverFcmToken.substring(0, 20) + '...');
     return true;
   } catch (err) {
     if (err.code === 'messaging/invalid-registration-token' || err.code === 'messaging/registration-token-not-registered') {
@@ -133,13 +207,15 @@ async function sendMessageNotification(receiverFcmToken, payload) {
  * @returns {Promise<boolean>}
  */
 async function sendCallOfferNotification(calleeFcmToken, payload) {
-  initializeFirebase();
+  const firebaseAdmin = initializeFirebase();
 
   if (!calleeFcmToken || typeof calleeFcmToken !== 'string' || !calleeFcmToken.trim()) {
+    console.warn('FCM call offer: Invalid callee FCM token');
     return false;
   }
 
-  if (!admin || !isInitialized) {
+  if (!firebaseAdmin || !isInitialized) {
+    console.error('FCM call offer: Firebase not initialized, skipping push notification');
     return false;
   }
 
@@ -180,7 +256,8 @@ async function sendCallOfferNotification(calleeFcmToken, payload) {
       },
     };
 
-    await admin.messaging().send(fcmMessage);
+    const messageId = await firebaseAdmin.messaging().send(fcmMessage);
+    console.log('FCM call offer: Push notification sent successfully:', messageId);
     return true;
   } catch (err) {
     if (err.code === 'messaging/invalid-registration-token' || err.code === 'messaging/registration-token-not-registered') {

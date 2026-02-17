@@ -45,10 +45,14 @@ app.use('/api/call', callRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
+  const { isFirebaseInitialized } = require('./config/firebase');
   res.status(200).json({
     success: true,
     message: 'Server is running',
     timestamp: new Date().toISOString(),
+    firebase: {
+      initialized: isFirebaseInitialized(),
+    },
   });
 });
 
