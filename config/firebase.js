@@ -46,38 +46,22 @@ function initializeFirebase() {
     initializationAttempted = true;
   }
 
-  if (serviceAccountPath) {
+  // Prioritize JSON over file path (for production/cloud deployments)
+  // Try JSON first if available
+  if (serviceAccountJson) {
     try {
-      const resolvedPath = path.resolve(process.cwd(), serviceAccountPath);
-      if (!fs.existsSync(resolvedPath)) {
-        console.error('Firebase: Service account file not found at:', resolvedPath);
-        return null;
-      }
-      const fileContent = fs.readFileSync(resolvedPath, 'utf8');
-      const serviceAccount = JSON.parse(fileContent);
-      
-      // Validate required fields
-      if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
-        console.error('Firebase: Service account JSON missing required fields (project_id, private_key, client_email)');
-        return null;
-      }
-
-      admin = firebaseAdmin;
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-      isInitialized = true;
-      console.log('Firebase Admin initialized successfully (from file path)');
-      console.log('Firebase: Project ID:', serviceAccount.project_id);
-      return admin;
-    } catch (err) {
-      console.error('Firebase: Failed to initialize from path:', err.message);
-      console.error('Firebase: Error details:', err.stack);
-      return null;
-    }
-  } else if (serviceAccountJson) {
-    try {
-      // Try to decode base64 if it looks like base64
+      // Trim whitespace and newlines that might be added by environment variable editors
       if (typeof serviceAccountJson === 'string') {
-        // Check if it's base64 encoded
+        serviceAccountJson = serviceAccountJson.trim();
+        
+        // Remove surrounding quotes if present (some env var editors add them)
+        if ((serviceAccountJson.startsWith('"') && serviceAccountJson.endsWith('"')) ||
+            (serviceAccountJson.startsWith("'") && serviceAccountJson.endsWith("'"))) {
+          serviceAccountJson = serviceAccountJson.slice(1, -1);
+          console.log('Firebase: Removed surrounding quotes from JSON string');
+        }
+        
+        // Try to decode base64 if it looks like base64
         const base64Pattern = /^[A-Za-z0-9+/=]+$/;
         if (base64Pattern.test(serviceAccountJson) && serviceAccountJson.length > 100) {
           try {
@@ -113,6 +97,35 @@ function initializeFirebase() {
       if (err.message.includes('JSON')) {
         console.error('Firebase: JSON parsing failed. Check if FIREBASE_SERVICE_ACCOUNT_JSON is valid JSON or base64 encoded JSON.');
       }
+      return null;
+    }
+  } else if (serviceAccountPath) {
+    // Fallback to file path (for local development)
+    try {
+      const resolvedPath = path.resolve(process.cwd(), serviceAccountPath);
+      if (!fs.existsSync(resolvedPath)) {
+        console.warn('Firebase: Service account file not found at:', resolvedPath);
+        console.warn('Firebase: Falling back to check if JSON is available...');
+        return null;
+      }
+      const fileContent = fs.readFileSync(resolvedPath, 'utf8');
+      const serviceAccount = JSON.parse(fileContent);
+      
+      // Validate required fields
+      if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
+        console.error('Firebase: Service account JSON missing required fields (project_id, private_key, client_email)');
+        return null;
+      }
+
+      admin = firebaseAdmin;
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      isInitialized = true;
+      console.log('Firebase Admin initialized successfully (from file path)');
+      console.log('Firebase: Project ID:', serviceAccount.project_id);
+      return admin;
+    } catch (err) {
+      console.error('Firebase: Failed to initialize from path:', err.message);
+      console.error('Firebase: Error details:', err.stack);
       return null;
     }
   } else {

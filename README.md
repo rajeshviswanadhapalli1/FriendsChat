@@ -49,8 +49,11 @@ WEBRTC_STUN_URL=stun:stun.l.google.com:19302
 # WEBRTC_TURN_CREDENTIAL=secret
 
 # Optional: Firebase (for push notifications)
-FIREBASE_SERVICE_ACCOUNT_PATH=./path/to/serviceAccountKey.json
-# OR: FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...} (base64 or raw JSON)
+# For local development (file path):
+FIREBASE_SERVICE_ACCOUNT_PATH=./config/serviceAccountKey.json
+# For production (Render, etc.) - use JSON string instead:
+# FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}
+# Note: The JSON can be base64 encoded or raw JSON string. The code auto-detects base64.
 ```
 
 4. Start the server:
