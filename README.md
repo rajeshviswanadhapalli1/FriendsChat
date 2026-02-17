@@ -4,7 +4,7 @@ A complete chat backend application built with Node.js, Express, MongoDB, and So
 
 ## Features
 
-- **Authentication**: Mobile number-based OTP authentication (Twilio)
+- **Authentication**: Mobile number-based OTP authentication (static OTP for development)
 - **JWT Tokens**: Access and refresh token implementation
 - **Chat List**: Get all chats for logged-in user
 - **User Search**: Search users by mobile number with `inDatabase` flag
@@ -37,10 +37,9 @@ JWT_REFRESH_EXPIRE=7d
 PORT=3000
 NODE_ENV=development
 
-# Twilio Configuration (for OTP SMS)
-TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
-TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
-TWILIO_VERIFY_SERVICE_SID=your_twilio_verify_service_sid_here
+# OTP Configuration
+# Note: Currently using static OTP (468026) for all users in development
+# For production, implement a proper OTP service
 
 # Optional: WebRTC (STUN/TURN for calls). Dev often works with STUN only.
 WEBRTC_STUN_URL=stun:stun.l.google.com:19302
@@ -486,7 +485,7 @@ chat-backend/
 
 ## Security Notes
 
-1. **OTP**: In production, integrate with an SMS service (Twilio, AWS SNS, etc.) to send OTPs. Currently, OTPs are logged to console for development.
+1. **OTP**: Currently using a static OTP (468026) for all users. In production, implement a proper OTP service (SMS gateway, email, etc.) for secure authentication.
 
 2. **JWT Secrets**: Change the JWT secrets in production to strong, random strings.
 

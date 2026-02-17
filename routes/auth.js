@@ -5,9 +5,11 @@ const OTP = require('../models/OTP');
 const { generateOTP } = require('../utils/otpGenerator');
 const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/auth');
-const { sendOTPViaSMS, verifyOTPViaSMS } = require('../config/twilio');
 
-// Send OTP to mobile number (via Twilio SMS)
+// Static OTP for all users
+const STATIC_OTP = '468026';
+
+// Send OTP to mobile number (static OTP)
 router.post('/send-otp', async (req, res) => {
   try {
     const { mobileNumber } = req.body;
@@ -19,20 +21,13 @@ router.post('/send-otp', async (req, res) => {
       });
     }
 
-    // Send OTP via Twilio Verify API
-    const result = await sendOTPViaSMS(mobileNumber);
-
-    if (result.success) {
-      res.status(200).json({
-        success: true,
-        message: 'OTP sent successfully via SMS',
-      });
-    } else {
-      res.status(500).json({
-        success: false,
-        message: 'Failed to send OTP',
-      });
-    }
+    // Return success with static OTP (for development/testing)
+    console.log(`OTP for ${mobileNumber}: ${STATIC_OTP}`);
+    
+    res.status(200).json({
+      success: true,
+      message: 'OTP sent successfully',
+    });
   } catch (error) {
     console.error('Error sending OTP:', error);
     res.status(500).json({
@@ -43,7 +38,7 @@ router.post('/send-otp', async (req, res) => {
   }
 });
 
-// Verify OTP and login/register (via Twilio Verify API)
+// Verify OTP and login/register (static OTP)
 router.post('/verify-otp', async (req, res) => {
   try {
     const { mobileNumber, otp } = req.body;
@@ -55,13 +50,11 @@ router.post('/verify-otp', async (req, res) => {
       });
     }
 
-    // Verify OTP via Twilio Verify API
-    const verificationResult = await verifyOTPViaSMS(mobileNumber, otp);
-
-    if (!verificationResult.success) {
+    // Verify OTP against static OTP
+    if (otp !== STATIC_OTP) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired OTP',
+        message: 'Invalid OTP',
       });
     }
 
