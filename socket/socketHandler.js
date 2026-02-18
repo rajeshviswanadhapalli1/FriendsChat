@@ -2,7 +2,8 @@ const { verifyAccessToken, verifyRefreshToken, generateAccessToken } = require('
 const User = require('../models/User');
 const Chat = require('../models/Chat');
 const Message = require('../models/Message');
-const { sendMessageNotification, sendCallOfferNotification } = require('../config/firebase');
+const CallHistory = require('../models/CallHistory');
+const { sendMessageNotification, sendCallOfferNotification, sendMissedCallNotification } = require('../config/firebase');
 
 // Store active users (userId -> socketId)
 const activeUsers = new Map();
@@ -10,6 +11,12 @@ const activeUsers = new Map();
 const socketRefreshTokens = new Map();
 // Store active calls (channelId -> { callerId, calleeId, callerName })
 const activeCalls = new Map();
+// Dedupe: only one invite + one FCM per channelId
+const callInviteSentForChannel = new Set();
+// 3-minute ring timeout: channelId -> { timeoutId, calleeFcmToken }
+const callRingTimeouts = new Map();
+
+const RING_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
 
 const initializeSocket = (io) => {
   // Authentication middleware for Socket.io
@@ -89,77 +96,157 @@ const initializeSocket = (io) => {
     // =========================
     // Events: call-invite (offer), call-accept (answer), ice-candidate, call-reject, call-end
 
-    // Caller starts call: sends offer. Server forwards to callee.
+    // Caller starts call: sends offer. Server forwards to callee once per channelId and sends one FCM; 3-min ring timeout.
     // Payload: { channelId, callType: 'audio'|'video', callerId, callerName, calleeId, offer }
     socket.on('call-invite', async (data) => {
       try {
         const { channelId, callType = 'audio', callerId, callerName, calleeId, offer } = data || {};
 
-        if (!channelId || !callerId || !calleeId || !offer) {
-          socket.emit('call-error', { message: 'channelId, callerId, calleeId and offer are required' });
+        if (!channelId || !callerId || !calleeId) {
+          socket.emit('call-error', { message: 'channelId, callerId and calleeId are required' });
           return;
         }
 
-        if (callerId.toString() !== socket.userId.toString()) {
+        const channelIdStr = String(channelId);
+        if (callInviteSentForChannel.has(channelIdStr)) {
+          return; // One invite + one FCM per call; ignore duplicate
+        }
+
+        // Normalize IDs for consistent lookup (client may send string or object)
+        const callerIdStr = String(callerId).trim();
+        const calleeIdStr = String(calleeId).trim();
+        const myUserIdStr = socket.userId.toString();
+
+        if (callerIdStr !== myUserIdStr) {
           socket.emit('call-error', { message: 'callerId must match authenticated user' });
           return;
         }
 
-        if (calleeId.toString() === socket.userId.toString()) {
+        if (calleeIdStr === myUserIdStr) {
           socket.emit('call-error', { message: 'Cannot call yourself' });
           return;
         }
 
-        const callee = await User.findById(calleeId).select('_id isActive');
+        // Offer can be object { type, sdp }; ensure we have at least type and sdp for signaling
+        const offerPayload = offer && (offer.sdp || offer.type)
+          ? { type: offer.type || 'offer', sdp: offer.sdp || '' }
+          : null;
+        if (!offerPayload) {
+          socket.emit('call-error', { message: 'offer with type and sdp is required' });
+          return;
+        }
+
+        const callee = await User.findById(calleeIdStr).select('_id isActive fcmToken').lean();
         if (!callee || !callee.isActive) {
-          socket.emit('call-unavailable', { channelId, calleeId, message: 'User not found or inactive' });
+          socket.emit('call-unavailable', { channelId, calleeId: calleeIdStr, message: 'User not found or inactive' });
           return;
         }
 
-        const calleeSocketId = activeUsers.get(calleeId.toString());
-        if (!calleeSocketId) {
-          socket.emit('call-unavailable', { channelId, calleeId, message: 'User is offline' });
-          return;
-        }
-
+        // Check busy: either user already in a call
         for (const [, c] of activeCalls) {
           if (
-            c.callerId.toString() === socket.userId.toString() ||
-            c.calleeId.toString() === socket.userId.toString() ||
-            c.callerId.toString() === calleeId.toString() ||
-            c.calleeId.toString() === calleeId.toString()
+            c.callerId.toString() === myUserIdStr ||
+            c.calleeId.toString() === myUserIdStr ||
+            c.callerId.toString() === calleeIdStr ||
+            c.calleeId.toString() === calleeIdStr
           ) {
-            socket.emit('call-busy', { channelId, calleeId, message: 'User is busy' });
+            socket.emit('call-busy', { channelId, calleeId: calleeIdStr, message: 'User is busy' });
             return;
           }
         }
 
-        activeCalls.set(String(channelId), {
-          callerId: socket.userId,
-          calleeId,
-          callerName: callerName || '',
-        });
+        callInviteSentForChannel.add(channelIdStr);
 
-        io.to(calleeSocketId).emit('call-invite', {
-          channelId,
-          callType,
-          callerId,
-          callerName: callerName || '',
-          calleeId,
-          offer,
-        });
+        const calleeSocketId = activeUsers.get(calleeIdStr);
+        const isCalleeOnline = Boolean(calleeSocketId);
 
-        // Push notification for incoming call (e.g. when app is in background)
-        const calleeUser = await User.findById(calleeId).select('fcmToken').lean();
-        if (calleeUser?.fcmToken) {
-          sendCallOfferNotification(calleeUser.fcmToken, {
-            channelId,
+        if (isCalleeOnline) {
+          const inviteSentAt = new Date();
+          activeCalls.set(channelIdStr, {
             callerId: socket.userId,
+            calleeId: calleeIdStr,
             callerName: callerName || '',
-            calleeId,
             callType,
-          }).catch((err) => console.error('FCM call offer:', err.message));
+            inviteSentAt,
+          });
+
+          io.to(calleeSocketId).emit('call-invite', {
+            channelId,
+            callType,
+            callerId: callerIdStr,
+            callerName: callerName || '',
+            calleeId: calleeIdStr,
+            offer: offerPayload,
+          });
+          console.log('Call invite sent via socket', { channelId, callerId: callerIdStr, calleeId: calleeIdStr });
+        } else {
+          socket.emit('call-unavailable', { channelId, calleeId: calleeIdStr, message: 'User is offline' });
         }
+
+        // One FCM per call: incoming call (with optional callerPhone)
+        const callerUser = await User.findById(callerIdStr).select('mobileNumber').lean();
+        const callerPhone = callerUser?.mobileNumber ? String(callerUser.mobileNumber) : '';
+
+        if (callee.fcmToken) {
+          sendCallOfferNotification(callee.fcmToken, {
+            channelId,
+            callerId: callerIdStr,
+            callerName: callerName || '',
+            calleeId: calleeIdStr,
+            callType,
+            callerPhone,
+          })
+            .then((ok) => {
+              if (ok) console.log('Call offer push sent', { calleeId: calleeIdStr });
+              else console.warn('Call offer push not sent (check FCM)', { calleeId: calleeIdStr });
+            })
+            .catch((err) => console.error('FCM call offer:', err.message));
+        } else {
+          console.log('Callee has no fcmToken, skip call push', { calleeId: calleeIdStr });
+        }
+
+        // 3-minute ring timeout: if no call-accept, end call and send missed_call FCM to callee
+        const timeoutId = setTimeout(async () => {
+          callRingTimeouts.delete(channelIdStr);
+          callInviteSentForChannel.delete(channelIdStr);
+          const call = activeCalls.get(channelIdStr);
+          activeCalls.delete(channelIdStr);
+
+          const cid = call?.callerId?.toString?.() ?? callerIdStr;
+          const calleeIdForEnd = call?.calleeId?.toString?.() ?? calleeIdStr;
+          const callerSocketId = activeUsers.get(cid);
+          const calleeSocketIdEnd = activeUsers.get(calleeIdForEnd);
+          if (callerSocketId) io.to(callerSocketId).emit('call-ended', { channelId });
+          if (calleeSocketIdEnd) io.to(calleeSocketIdEnd).emit('call-ended', { channelId });
+
+          const startedAt = call?.inviteSentAt ? new Date(call.inviteSentAt) : new Date(Date.now() - RING_TIMEOUT_MS);
+          const endedAt = new Date();
+          try {
+            await CallHistory.create({
+              callerId: callerIdStr,
+              calleeId: calleeIdStr,
+              channelId: channelIdStr,
+              callType,
+              status: 'missed',
+              startedAt,
+              endedAt,
+              durationSeconds: 0,
+            });
+          } catch (e) {
+            console.error('CallHistory create (missed):', e.message);
+          }
+
+          if (callee.fcmToken) {
+            await sendMissedCallNotification(callee.fcmToken, {
+              channelId,
+              callerId: callerIdStr,
+              callerName: callerName || '',
+              callType,
+              callerPhone,
+            });
+          }
+        }, RING_TIMEOUT_MS);
+        callRingTimeouts.set(channelIdStr, { timeoutId, calleeFcmToken: callee.fcmToken });
       } catch (error) {
         console.error('call-invite error:', error);
         socket.emit('call-error', { message: 'Error starting call' });
@@ -176,7 +263,8 @@ const initializeSocket = (io) => {
           return;
         }
 
-        const call = activeCalls.get(String(channelId));
+        const channelIdStr = String(channelId);
+        const call = activeCalls.get(channelIdStr);
         if (!call) {
           socket.emit('call-error', { message: 'Call not found' });
           return;
@@ -190,9 +278,18 @@ const initializeSocket = (io) => {
         const callerSocketId = activeUsers.get(callerId.toString());
         if (!callerSocketId) {
           socket.emit('call-error', { message: 'Caller is offline' });
-          activeCalls.delete(String(channelId));
+          activeCalls.delete(channelIdStr);
           return;
         }
+
+        const ringTimeout = callRingTimeouts.get(channelIdStr);
+        if (ringTimeout) {
+          clearTimeout(ringTimeout.timeoutId);
+          callRingTimeouts.delete(channelIdStr);
+        }
+
+        call.acceptedAt = new Date();
+        activeCalls.set(channelIdStr, call);
 
         io.to(callerSocketId).emit('call-accepted', { channelId, callerId, answer });
       } catch (error) {
@@ -218,28 +315,58 @@ const initializeSocket = (io) => {
       }
     });
 
-    // Callee rejects (client → server). Notify caller.
+    // Callee rejects (client → server). Cancel ring timer and notify caller so they leave "Calling…" UI.
     socket.on('call-reject', async (data) => {
       const { channelId, callerId } = data || {};
       if (!channelId || !callerId) return;
 
-      const call = activeCalls.get(String(channelId));
-      if (!call) return;
+      const channelIdStr = String(channelId);
+      const callerIdStr = String(callerId).trim();
 
-      const callerSocketId = activeUsers.get(callerId.toString());
-      if (callerSocketId) {
-        io.to(callerSocketId).emit('call-rejected', { channelId, callerId });
+      // 1. Cancel 3-minute ring timer so no missed-call FCM is sent
+      const ringTimeout = callRingTimeouts.get(channelIdStr);
+      if (ringTimeout) {
+        clearTimeout(ringTimeout.timeoutId);
+        callRingTimeouts.delete(channelIdStr);
       }
 
-      activeCalls.delete(String(channelId));
+      const call = activeCalls.get(channelIdStr);
+      if (call) {
+        const startedAt = call.inviteSentAt ? new Date(call.inviteSentAt) : new Date();
+        const endedAt = new Date();
+        try {
+          await CallHistory.create({
+            callerId: call.callerId,
+            calleeId: call.calleeId,
+            channelId: channelIdStr,
+            callType: call.callType || 'audio',
+            status: 'rejected',
+            startedAt,
+            endedAt,
+            durationSeconds: 0,
+          });
+        } catch (e) {
+          console.error('CallHistory create (rejected):', e.message);
+        }
+      }
+
+      // 2. Tell the caller so their app can dismiss the call UI and go to Call History
+      const callerSocketId = activeUsers.get(callerIdStr);
+      if (callerSocketId) {
+        io.to(callerSocketId).emit('call-rejected', { channelId });
+      }
+
+      callInviteSentForChannel.delete(channelIdStr);
+      activeCalls.delete(channelIdStr);
     });
 
-    // Either party ends call. Notify other peer.
+    // Either party ends call. Notify other peer and save call history (answered).
     socket.on('call-end', async (data) => {
       const { channelId } = data || {};
       if (!channelId) return;
 
-      const call = activeCalls.get(String(channelId));
+      const channelIdStr = String(channelId);
+      const call = activeCalls.get(channelIdStr);
       if (!call) return;
 
       const otherUserId =
@@ -250,7 +377,31 @@ const initializeSocket = (io) => {
         io.to(otherSocketId).emit('call-ended', { channelId });
       }
 
-      activeCalls.delete(String(channelId));
+      const endedAt = new Date();
+      const startedAt = call.acceptedAt ? new Date(call.acceptedAt) : (call.inviteSentAt ? new Date(call.inviteSentAt) : endedAt);
+      const durationSeconds = call.acceptedAt ? Math.round((endedAt - new Date(call.acceptedAt)) / 1000) : 0;
+      try {
+        await CallHistory.create({
+          callerId: call.callerId,
+          calleeId: call.calleeId,
+          channelId: channelIdStr,
+          callType: call.callType || 'audio',
+          status: 'answered',
+          startedAt,
+          endedAt,
+          durationSeconds,
+        });
+      } catch (e) {
+        console.error('CallHistory create (answered):', e.message);
+      }
+
+      const ringTimeout = callRingTimeouts.get(channelIdStr);
+      if (ringTimeout) {
+        clearTimeout(ringTimeout.timeoutId);
+        callRingTimeouts.delete(channelIdStr);
+      }
+      callInviteSentForChannel.delete(channelIdStr);
+      activeCalls.delete(channelIdStr);
     });
 
     // Handle token refresh for socket connection
@@ -679,6 +830,12 @@ const initializeSocket = (io) => {
           if (otherSocketId) {
             io.to(otherSocketId).emit('call-ended', { channelId });
           }
+          const ringTimeout = callRingTimeouts.get(channelId);
+          if (ringTimeout) {
+            clearTimeout(ringTimeout.timeoutId);
+            callRingTimeouts.delete(channelId);
+          }
+          callInviteSentForChannel.delete(channelId);
           activeCalls.delete(channelId);
         }
       }

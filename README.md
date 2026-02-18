@@ -4,7 +4,7 @@ A complete chat backend application built with Node.js, Express, MongoDB, and So
 
 ## Features
 
-- **Authentication**: Mobile number-based OTP authentication (static OTP for development)
+- **Authentication**: Mobile number-based OTP authentication (Twilio)
 - **JWT Tokens**: Access and refresh token implementation
 - **Chat List**: Get all chats for logged-in user
 - **User Search**: Search users by mobile number with `inDatabase` flag
@@ -29,7 +29,7 @@ npm install
 
 3. Create a `.env` file in the root directory with the following variables:
 ```env
-MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/chat-app?retryWrites=true&w=majority
+MONGODB_URI=mongodb+srv://rajesh6v6_db_user:I2IJUXDAW4R1cMqt@cluster0.n0dwx1t.mongodb.net/chat-app?retryWrites=true&w=majority
 JWT_SECRET=your-super-secret-jwt-key-change-this-in-production
 JWT_REFRESH_SECRET=your-super-secret-refresh-jwt-key-change-this-in-production
 JWT_EXPIRE=15m
@@ -49,11 +49,8 @@ WEBRTC_STUN_URL=stun:stun.l.google.com:19302
 # WEBRTC_TURN_CREDENTIAL=secret
 
 # Optional: Firebase (for push notifications)
-# For local development (file path):
-FIREBASE_SERVICE_ACCOUNT_PATH=./config/serviceAccountKey.json
-# For production (Render, etc.) - use JSON string instead:
-# FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"...","private_key":"...","client_email":"..."}
-# Note: The JSON can be base64 encoded or raw JSON string. The code auto-detects base64.
+FIREBASE_SERVICE_ACCOUNT_PATH=./path/to/serviceAccountKey.json
+# OR: FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...} (base64 or raw JSON)
 ```
 
 4. Start the server:
@@ -348,6 +345,53 @@ Response:
 }
 ```
 
+### Call
+
+#### 1. Get ICE config (WebRTC)
+**GET** `/api/call/config`
+
+Headers: `Authorization: Bearer <accessToken>`
+
+Response: `{ success: true, data: { iceServers: [...] } }`
+
+#### 2. Get call history
+**GET** `/api/call/history?page=1&limit=20`
+
+Headers: `Authorization: Bearer <accessToken>`
+
+Response:
+```json
+{
+  "success": true,
+  "data": {
+    "calls": [
+      {
+        "_id": "call_history_id",
+        "channelId": "channel_id",
+        "direction": "outgoing",
+        "callType": "audio",
+        "status": "answered",
+        "startedAt": "2024-01-01T00:00:00.000Z",
+        "endedAt": "2024-01-01T00:05:00.000Z",
+        "durationSeconds": 300,
+        "otherUser": {
+          "_id": "user_id",
+          "mobileNumber": "9876543210",
+          "name": "User name",
+          "profilePicture": ""
+        }
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 50, "pages": 3 }
+  }
+}
+```
+
+- **direction:** `"incoming"` | `"outgoing"`
+- **status:** `"missed"` | `"rejected"` | `"answered"`
+- **callType:** `"audio"` | `"video"`
+- Call history is updated automatically when a call is rejected, missed (timeout), or ended after answer.
+
 ## Socket.io Events
 
 ### Client to Server Events
@@ -488,7 +532,7 @@ chat-backend/
 
 ## Security Notes
 
-1. **OTP**: Currently using a static OTP (468026) for all users. In production, implement a proper OTP service (SMS gateway, email, etc.) for secure authentication.
+1. **OTP**: In production, integrate with an SMS service (Twilio, AWS SNS, etc.) to send OTPs. Currently, OTPs are logged to console for development.
 
 2. **JWT Secrets**: Change the JWT secrets in production to strong, random strings.
 

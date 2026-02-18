@@ -45,40 +45,10 @@ app.use('/api/call', callRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  const { isFirebaseInitialized, initializeFirebase } = require('./config/firebase');
-  
-  // Try to initialize Firebase if not already initialized
-  const firebaseAdmin = initializeFirebase();
-  
-  const envJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  let jsonPreview = '';
-  let jsonError = null;
-  
-  if (envJson) {
-    try {
-      const trimmed = envJson.trim();
-      const cleaned = (trimmed.startsWith('"') && trimmed.endsWith('"')) ? trimmed.slice(1, -1) : trimmed;
-      const parsed = JSON.parse(cleaned);
-      jsonPreview = `Valid JSON (project_id: ${parsed.project_id || 'missing'})`;
-    } catch (err) {
-      jsonError = err.message;
-      jsonPreview = `Invalid JSON: ${err.message.substring(0, 100)}`;
-    }
-  }
-  
   res.status(200).json({
     success: true,
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    firebase: {
-      initialized: isFirebaseInitialized(),
-      hasAdmin: !!firebaseAdmin,
-      envPath: !!process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
-      envJson: !!envJson,
-      envJsonLength: envJson ? envJson.length : 0,
-      jsonPreview: jsonPreview || 'No JSON set',
-      jsonError: jsonError || null,
-    },
   });
 });
 

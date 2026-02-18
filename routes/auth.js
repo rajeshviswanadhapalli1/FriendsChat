@@ -5,11 +5,10 @@ const OTP = require('../models/OTP');
 const { generateOTP } = require('../utils/otpGenerator');
 const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/jwt');
 const { authenticate } = require('../middleware/auth');
+// Fixed OTP for login (no Twilio). Override with DEV_OTP in .env if needed.
+const FIXED_OTP = process.env.DEV_OTP || '468026';
 
-// Static OTP for all users
-const STATIC_OTP = '468026';
-
-// Send OTP to mobile number (static OTP)
+// Send OTP to mobile number (no SMS; client uses fixed OTP 468026)
 router.post('/send-otp', async (req, res) => {
   try {
     const { mobileNumber } = req.body;
@@ -21,9 +20,6 @@ router.post('/send-otp', async (req, res) => {
       });
     }
 
-    // Return success with static OTP (for development/testing)
-    console.log(`OTP for ${mobileNumber}: ${STATIC_OTP}`);
-    
     res.status(200).json({
       success: true,
       message: 'OTP sent successfully',
@@ -38,7 +34,7 @@ router.post('/send-otp', async (req, res) => {
   }
 });
 
-// Verify OTP and login/register (static OTP)
+// Verify OTP and login/register (accept fixed OTP only, no Twilio)
 router.post('/verify-otp', async (req, res) => {
   try {
     const { mobileNumber, otp } = req.body;
@@ -50,11 +46,10 @@ router.post('/verify-otp', async (req, res) => {
       });
     }
 
-    // Verify OTP against static OTP
-    if (otp !== STATIC_OTP) {
+    if (String(otp).trim() !== FIXED_OTP) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid OTP',
+        message: 'Invalid or expired OTP',
       });
     }
 
