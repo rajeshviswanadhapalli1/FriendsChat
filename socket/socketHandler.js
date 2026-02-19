@@ -15,6 +15,8 @@ const activeCalls = new Map();
 const callInviteSentForChannel = new Set();
 // 3-minute ring timeout: channelId -> { timeoutId, calleeFcmToken }
 const callRingTimeouts = new Map();
+// After reject/end/timeout: never send invite or FCM for this channelId again
+const endedOrRejectedChannels = new Set();
 
 const RING_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes
 
@@ -108,6 +110,10 @@ const initializeSocket = (io) => {
         }
 
         const channelIdStr = String(channelId);
+        if (endedOrRejectedChannels.has(channelIdStr)) {
+          socket.emit('call-ended', { channelId, message: 'Call already ended or rejected' });
+          return;
+        }
         if (callInviteSentForChannel.has(channelIdStr)) {
           return; // One invite + one FCM per call; ignore duplicate
         }
@@ -168,6 +174,7 @@ const initializeSocket = (io) => {
             callerName: callerName || '',
             callType,
             inviteSentAt,
+            offer: offerPayload,
           });
 
           io.to(calleeSocketId).emit('call-invite', {
@@ -208,6 +215,7 @@ const initializeSocket = (io) => {
         // 3-minute ring timeout: if no call-accept, end call and send missed_call FCM to callee
         const timeoutId = setTimeout(async () => {
           callRingTimeouts.delete(channelIdStr);
+          endedOrRejectedChannels.add(channelIdStr);
           callInviteSentForChannel.delete(channelIdStr);
           const call = activeCalls.get(channelIdStr);
           activeCalls.delete(channelIdStr);
@@ -315,7 +323,8 @@ const initializeSocket = (io) => {
       }
     });
 
-    // Callee rejects (client → server). Cancel ring timer and notify caller so they leave "Calling…" UI.
+    // Callee rejects (client → server). Cancel ring timer, mark channel ended, then notify caller.
+    // After this, no more call-invite or FCM must be sent for this channelId.
     socket.on('call-reject', async (data) => {
       const { channelId, callerId } = data || {};
       if (!channelId || !callerId) return;
@@ -350,17 +359,21 @@ const initializeSocket = (io) => {
         }
       }
 
-      // 2. Tell the caller so their app can dismiss the call UI and go to Call History
+      // 2. Mark call ended for this channelId so we never send another invite or FCM for it
+      endedOrRejectedChannels.add(channelIdStr);
+      callInviteSentForChannel.delete(channelIdStr);
+      activeCalls.delete(channelIdStr);
+
+      // 3. Notify both sides so both UIs end at the same time
       const callerSocketId = activeUsers.get(callerIdStr);
       if (callerSocketId) {
         io.to(callerSocketId).emit('call-rejected', { channelId });
       }
-
-      callInviteSentForChannel.delete(channelIdStr);
-      activeCalls.delete(channelIdStr);
+      // Callee (this socket) also gets call-ended so both users end the call together
+      socket.emit('call-ended', { channelId });
     });
 
-    // Either party ends call. Notify other peer and save call history (answered).
+    // Either party ends call. Notify both sides so both UIs end at the same time.
     socket.on('call-end', async (data) => {
       const { channelId } = data || {};
       if (!channelId) return;
@@ -373,9 +386,12 @@ const initializeSocket = (io) => {
         call.callerId.toString() === socket.userId.toString() ? call.calleeId : call.callerId;
       const otherSocketId = activeUsers.get(otherUserId.toString());
 
+      // Notify other peer
       if (otherSocketId) {
         io.to(otherSocketId).emit('call-ended', { channelId });
       }
+      // Notify sender too so both users end the call together
+      socket.emit('call-ended', { channelId });
 
       const endedAt = new Date();
       const startedAt = call.acceptedAt ? new Date(call.acceptedAt) : (call.inviteSentAt ? new Date(call.inviteSentAt) : endedAt);
@@ -400,8 +416,20 @@ const initializeSocket = (io) => {
         clearTimeout(ringTimeout.timeoutId);
         callRingTimeouts.delete(channelIdStr);
       }
+      endedOrRejectedChannels.add(channelIdStr);
       callInviteSentForChannel.delete(channelIdStr);
       activeCalls.delete(channelIdStr);
+    });
+
+    // Callee can request the offer by channelId (e.g. when opening from FCM before socket got call-invite)
+    socket.on('call-request-offer', (data) => {
+      const { channelId } = data || {};
+      if (!channelId) return;
+      const channelIdStr = String(channelId);
+      const call = activeCalls.get(channelIdStr);
+      if (!call || !call.offer) return;
+      if (call.calleeId.toString() !== socket.userId.toString()) return;
+      socket.emit('call-offer', { channelId, offer: call.offer });
     });
 
     // Handle token refresh for socket connection
@@ -835,6 +863,7 @@ const initializeSocket = (io) => {
             clearTimeout(ringTimeout.timeoutId);
             callRingTimeouts.delete(channelId);
           }
+          endedOrRejectedChannels.add(channelId);
           callInviteSentForChannel.delete(channelId);
           activeCalls.delete(channelId);
         }
